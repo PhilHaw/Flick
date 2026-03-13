@@ -35,7 +35,7 @@
  * - ReverbEffect:     Base class for reverb algorithms (reverb_effect.h)
  *   - PlateReverb:    Dattorro algorithm (plate_reverb.h/cpp)
  *   - HallReverb:     Schroeder algorithm (hall_reverb.h/cpp)
- *   - SpringReverb:   Digital waveguide (spring_reverb.h/cpp)
+ *   - CloudReverb:    CloudSeed algorithm (cloud_reverb.h/cpp)
  *
  * ORCHESTRATOR RESPONSIBILITIES:
  * - Read hardware controls (knobs, switches, footswitches)
@@ -64,7 +64,7 @@
 #include "reverb_effect.h"
 #include "plate_reverb.h"
 #include "hall_reverb.h"
-#include "spring_reverb.h"
+#include "cloud_reverb.h"
 #include "parameter_capture.h"
 #include <math.h>
 
@@ -80,7 +80,7 @@ using flick::HarmonicTremolo;
 using flick::ReverbEffect;
 using flick::PlateReverb;
 using flick::HallReverb;
-using flick::SpringReverb;
+using flick::CloudReverb;
 using flick::Funbox;
 using flick::KnobCapture;
 using flick::SwitchCapture;
@@ -105,12 +105,9 @@ using daisysp::fonepole;
 constexpr float SAMPLE_RATE = 48000.0f;
 constexpr size_t MAX_DELAY = static_cast<size_t>(SAMPLE_RATE * 2.0f);
 
-// Notch filter constants (always active)
-// Target the Daisy Seed's hardware interference tones. These appear to be
-// analog-domain noise from DMA/codec activity, not tied to the current
-// callback rate. The notch filters provide partial attenuation.
-constexpr float NOTCH_1_FREQ = 6037.7f;    // Primary hardware interference tone
-constexpr float NOTCH_2_FREQ = 16000.0f;   // Secondary interference tone
+// Filter frequency constants (notch filters always active)
+constexpr float NOTCH_1_FREQ = 6020.0f;   // Daisy Seed resonance notch
+constexpr float NOTCH_2_FREQ = 12278.0f;  // Daisy Seed resonance notch
 
 // Reverb constants (Dattorro plate reverb scaling)
 constexpr float PLATE_PRE_DELAY_SCALE = 0.25f;
@@ -155,9 +152,6 @@ constexpr float DELAY_DRY_WET_PERCENT_MAX = 100.0f; // Max value for dry/wet per
 constexpr uint32_t TAP_TEMPO_TIMEOUT_MS = 4000; // Auto-exit after 4 seconds of no taps
 constexpr int TAP_FLASH_CALLBACKS = 300;         // ~50ms LED flash at 6000 callbacks/sec
 
-// Tremolo crossfade (prevents pops when toggling on/off)
-constexpr float TREMOLO_FADE_STEP = 1.0f / (SAMPLE_RATE * 0.03f); // ~30ms fade
-
 // Audio signal levels
 constexpr float MINUS_18DB_GAIN = 0.12589254f;
 constexpr float MINUS_20DB_GAIN = 0.1f;
@@ -192,13 +186,13 @@ constexpr MonoStereoMode kMonoStereoMap[] = {
 // Reverb algorithm selection (Toggle Switch 1 in normal mode)
 enum ReverbType {
   REVERB_PLATE,
-  REVERB_SPRING,
+  REVERB_CLOUD,
   REVERB_HALL,
   REVERB_DEFAULT = REVERB_PLATE
 };
 
 constexpr ReverbType kReverbTypeMap[] = {
-  REVERB_SPRING,  // UP (Hothouse) / RIGHT (Funbox)
+  REVERB_CLOUD,   // UP (Hothouse) / RIGHT (Funbox)
   REVERB_PLATE,   // MIDDLE
   REVERB_HALL,    // DOWN (Hothouse) / LEFT (Funbox)
 };
@@ -376,7 +370,7 @@ DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS delMemR;
 ReverbEffect* current_reverb = nullptr;
 PlateReverb plate_reverb;    // Dattorro algorithm (lush, complex)
 HallReverb hall_reverb;      // Schroeder algorithm (spacious)
-SpringReverb spring_reverb;  // Digital waveguide (vintage character)
+CloudReverb cloud_reverb;    // CloudSeed algorithm (ambient, dreamy)
 
 // Tremolo effects (polymorphic - switch at runtime)
 TremoloEffect* current_tremolo = nullptr;
@@ -411,21 +405,11 @@ PolarityMode polarity_mode = POLARITY_NORMAL;
 // Effect bypass states
 BypassState bypass;
 
-// Deferred tremolo toggle: delays the tremolo bypass change until after
-// the double-press window so a reverb double-press doesn't briefly
-// enable tremolo.
-uint32_t pending_tremolo_toggle_time = 0;
-bool tremolo_toggle_pending = false;
-
-// Tremolo crossfade level (0.0 = bypassed, 1.0 = fully active)
-float tremolo_fade = 0.0f;
-
 // Reverb orchestrator
 ReverbOrchestrator reverb;
 
 // Delay state
 float delay_time_target = 0.0f;  // Track delay time for tap tempo extraction
-float delay_time_base = 0.0f;   // Quarter-note base delay time (before timing subdivision)
 int delay_drywet;
 
 // Reverb mixing scale factors (updated when mono/stereo mode changes)
@@ -818,20 +802,21 @@ void handleNormalPress(Funbox::Switches footswitch) {
     pedal_mode = PEDAL_MODE_NORMAL;
   } else {
     if (footswitch == Funbox::FOOTSWITCH_1) {
-      // FOOTSWITCH_1: Defer tremolo toggle until after double-press window
-      // so a reverb double-press doesn't briefly enable tremolo.
-      if (tremolo_toggle_pending) {
-        // A pending toggle already exists (second press reverting it) — cancel it
-        tremolo_toggle_pending = false;
-      } else {
-        tremolo_toggle_pending = true;
-        pending_tremolo_toggle_time = System::GetNow();
+      bypass.reverb = !bypass.reverb;
+
+      if (bypass.reverb) {
+        // Clear the reverb tails when the reverb is bypassed so if you
+        // turn it back on, it starts fresh and doesn't sound weird.
+        if (current_reverb != nullptr) {
+          current_reverb->Clear();
+        }
       }
     } else {
-      // FOOTSWITCH_2: Toggle delay on/off
-      bypass.delay = !bypass.delay;
-      saveBypassStates();
+      // FOOTSWITCH_2: Toggle tremolo on/off
+      bypass.tremolo = !bypass.tremolo;
     }
+
+    saveBypassStates();
   }
 }
 
@@ -856,28 +841,18 @@ void handleDoublePress(Funbox::Switches footswitch) {
     return;
   }
 
+  // When double press is detected, a normal press was already detected and
+  // processed, so reverse that right off the bat.
+  handleNormalPress(footswitch);
+
   if (footswitch == Funbox::FOOTSWITCH_1) {
-    // Cancel the pending tremolo toggle from the first press
-    tremolo_toggle_pending = false;
-
-    // FOOTSWITCH_1 double press: Toggle reverb on/off
-    bypass.reverb = !bypass.reverb;
-
-    if (bypass.reverb) {
-      // Clear the reverb tails when the reverb is bypassed so if you
-      // turn it back on, it starts fresh and doesn't sound weird.
-      if (current_reverb != nullptr) {
-        current_reverb->Clear();
-      }
-    }
-
-    saveBypassStates();
+    // FOOTSWITCH_1 double press: Enter tap tempo mode
+    enterTapTempo();
   } else if (footswitch == Funbox::FOOTSWITCH_2) {
-    // Reverse the delay toggle from the first press
+    // FOOTSWITCH_2 double press: Toggle delay on/off
     bypass.delay = !bypass.delay;
 
-    // FOOTSWITCH_2 double press: Enter tap tempo mode
-    enterTapTempo();
+    saveBypassStates();
   }
 }
 
@@ -935,7 +910,6 @@ void handleLongPress(Funbox::Switches footswitch) {
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
                    size_t size) {
   static float trem_val;
-
   hw.ProcessAllControls();
 
   if (pedal_mode == PEDAL_MODE_EDIT_REVERB) {
@@ -965,60 +939,43 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     }
   } else {
     // Normal mode (and tap tempo)
+    led_left.Set(bypass.reverb ? 0.0f : 1.0f);
 
-    // LED 1 (left): reverb + tremolo status
-    // Reverb only: solid ON
-    // Tremolo only: pulsing at 40%
-    // Both: pulsing at 100%
-    // Neither: OFF
-    {
-      static int led_left_count = 0;
-      if (++led_left_count >= hw.AudioCallbackRate() / 100) {
-        led_left_count = 0;
-        if (!bypass.reverb && !bypass.tremolo) {
-          led_left.Set(trem_val);
-        } else if (!bypass.reverb) {
-          led_left.Set(1.0f);
-        } else if (!bypass.tremolo) {
-          led_left.Set(trem_val * TREMOLO_LED_BRIGHTNESS);
-        } else {
-          led_left.Set(0.0f);
-        }
-      }
-    }
+    if (pedal_mode == PEDAL_MODE_TAP_TEMPO) {
+      // Tap tempo right LED: rhythmic flash at tapped tempo
+      static uint32_t tap_led_counter = 0;
 
-    // LED 2 (right): delay tempo pulse
-    {
-      static uint32_t delay_led_counter = 0;
-
-      if (pedal_mode == PEDAL_MODE_TAP_TEMPO && tap_tempo.tap_flash_counter > 0) {
+      if (tap_tempo.tap_flash_counter > 0) {
         // Brief flash on each tap (overrides rhythmic flash)
         tap_tempo.tap_flash_counter--;
-        led_right.Set(TREMOLO_LED_BRIGHTNESS);
-        delay_led_counter = 0;  // Sync rhythmic flash to tap
-      } else if (!bypass.delay && delay_time_base > 0.0f) {
-        // Pulse at quarter-note delay tempo (10% duty cycle), ignoring timing subdivision
-        // Convert from samples to audio callbacks (samples / block_size)
-        uint32_t period = (uint32_t)(delay_time_base * hw.AudioCallbackRate() / SAMPLE_RATE);
+        led_right.Set(1.0f);
+        tap_led_counter = 0;  // Sync rhythmic flash to tap
+      } else if (tap_tempo.tapped_tempo_ms > 0.0f) {
+        // Continuous rhythmic flash at tapped tempo
+        uint32_t period = (uint32_t)(tap_tempo.tapped_tempo_ms * hw.AudioCallbackRate() / 1000.0f);
         if (period > 0) {
-          delay_led_counter = (delay_led_counter + 1) % period;
-          led_right.Set(delay_led_counter < (period / 10) ? TREMOLO_LED_BRIGHTNESS : 0.0f);
+          tap_led_counter = (tap_led_counter + 1) % period;
+          led_right.Set(tap_led_counter < (period / 10) ? 1.0f : 0.0f);  // 10% duty cycle
         }
       } else {
+        // No tempo established yet, LED off
         led_right.Set(0.0f);
+      }
+    } else {
+      // Normal mode right LED (existing pulsing trem/delay logic)
+      static int count = 0;
+      // set led 100 times/sec
+      if (++count == hw.AudioCallbackRate() / 100) {
+        count = 0;
+        // If just delay is on, show full-strength LED
+        // If just trem is on, show 40% pulsing LED
+        // If both are on, show 100% pulsing LED
+        led_right.Set(bypass.tremolo ? bypass.delay ? 0.0f : 1.0f : bypass.delay ? trem_val * TREMOLO_LED_BRIGHTNESS : trem_val);
       }
     }
   }
   led_left.Update();
   led_right.Update();
-
-  // Apply deferred tremolo toggle after double-press window has passed
-  if (tremolo_toggle_pending &&
-      (System::GetNow() - pending_tremolo_toggle_time) > Funbox::DOUBLE_PRESS_THRESHOLD_MS) {
-    tremolo_toggle_pending = false;
-    bypass.tremolo = !bypass.tremolo;
-    saveBypassStates();
-  }
 
   reverb.wet = p_verb_amt.Process();
 
@@ -1106,7 +1063,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     }
 
     // Apply timing subdivision (triplet, quarter, dotted eighth) in one place
-    delay_time_base = base_delay_time;
     delay_time_target = base_delay_time * kDelayTimingMultiplier[delay_timing];
     delay_effect.SetDelayTime(delay_time_target);
     delay_effect.SetFeedback(p_delay_feedback.Process());
@@ -1170,28 +1126,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   float polarity_L = (polarity_mode == POLARITY_INVERT_LEFT) ? -1.0f : 1.0f;
   float polarity_R = (polarity_mode == POLARITY_INVERT_RIGHT) ? -1.0f : 1.0f;
 
-  // Pre-compute values that are constant across all samples in this callback
-  float fdrywet = delay_drywet / 100.0f;
-  float delay_make_up_gain = makeup_gain == MAKEUP_GAIN_NONE ? 1.0f : 1.66f;
-  float trem_make_up_gain = makeup_gain == MAKEUP_GAIN_NONE ? 1.0f : 1.2f;
-  float reverb_gain = MINUS_18DB_GAIN * MINUS_20DB_GAIN * (1.0f + input_amplification * 7.0f) * clearPopCancelValue;
-
-  // Select active reverb algorithm and update parameters once per callback
-  switch (reverb.current_type) {
-    case REVERB_PLATE:
-      current_reverb = &plate_reverb;
-      updatePlateReverbParameters();
-      break;
-    case REVERB_SPRING:
-      current_reverb = &spring_reverb;
-      break;
-    case REVERB_HALL:
-      current_reverb = &hall_reverb;
-      break;
-  }
-
-  // Process every other sample (96kHz codec → 48kHz effective DSP rate).
-  for (size_t i = 0; i < size; i += 2) {
+  for (size_t i = 0; i < size; ++i) {
     float dry_L = in[0][i];
     float dry_R = in[1][i];
     float s_L, s_R;
@@ -1204,13 +1139,16 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
       s_R = dry_R;
     }
 
-    // Apply notch filters for hardware interference tones
+    // Apply notch filters for resonant frequencies
     s_L = notch1_L.Process(s_L);
     s_R = notch1_R.Process(s_R);
     s_L = notch2_L.Process(s_L);
     s_R = notch2_R.Process(s_R);
 
     if (!bypass.delay) {
+      float fdrywet = delay_drywet / 100.0f;
+      float delay_make_up_gain = makeup_gain == MAKEUP_GAIN_NONE ? 1.0f : 1.66f;
+
       // Process delay effect (returns wet signal only)
       float wet_L, wet_R;
       delay_effect.ProcessSample(s_L, s_R, &wet_L, &wet_R);
@@ -1221,27 +1159,19 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
       s_R = fdrywet * wet_R * 0.333f + (1.0f - fdrywet) * s_R * delay_make_up_gain;
     }
 
-    {
-      // Always process tremolo so the LFO stays in sync and we can crossfade
+    if (!bypass.tremolo) {
+      float trem_make_up_gain = makeup_gain == MAKEUP_GAIN_NONE ? 1.0f : 1.2f;
+
+      // Process tremolo effect
       float trem_out_L, trem_out_R;
       current_tremolo->ProcessSample(s_L, s_R, &trem_out_L, &trem_out_R);
+
+      // Apply makeup gain
+      s_L = trem_out_L * trem_make_up_gain;
+      s_R = trem_out_R * trem_make_up_gain;
+
+      // Store LFO value for LED pulsing
       trem_val = current_tremolo->GetLastLFOValue();
-
-      // Ramp tremolo_fade toward target to prevent pops
-      float target = bypass.tremolo ? 0.0f : 1.0f;
-      if (tremolo_fade < target) {
-        tremolo_fade = fminf(tremolo_fade + TREMOLO_FADE_STEP, target);
-      } else if (tremolo_fade > target) {
-        tremolo_fade = fmaxf(tremolo_fade - TREMOLO_FADE_STEP, target);
-      }
-
-      // Crossfade between dry and tremolo-processed signal
-      if (tremolo_fade > 0.0f) {
-        float wet_L = trem_out_L * trem_make_up_gain;
-        float wet_R = trem_out_R * trem_make_up_gain;
-        s_L = s_L * (1.0f - tremolo_fade) + wet_L * tremolo_fade;
-        s_R = s_R * (1.0f - tremolo_fade) + wet_R * tremolo_fade;
-      }
     }
 
     // Keep sending input to the reverb even if bypassed so that when it's
@@ -1251,10 +1181,25 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     left_input = hardLimit100_(s_L) * reverb_dry_scale_factor;
     right_input = hardLimit100_(s_R) * reverb_dry_scale_factor;
 
+    float gain = MINUS_18DB_GAIN * MINUS_20DB_GAIN * (1.0f + input_amplification * 7.0f) * clearPopCancelValue;
     float rev_l, rev_r;
 
+    // Switch active reverb algorithm based on toggle switch
+    switch (reverb.current_type) {
+      case REVERB_PLATE:
+        current_reverb = &plate_reverb;
+        updatePlateReverbParameters(); // Update plate-specific parameters
+        break;
+      case REVERB_CLOUD:
+        current_reverb = &cloud_reverb;
+        break;
+      case REVERB_HALL:
+        current_reverb = &hall_reverb;
+        break;
+    }
+
     // Process reverb via polymorphic interface
-    current_reverb->ProcessSample(left_input * reverb_gain, right_input * reverb_gain, &rev_l, &rev_r);
+    current_reverb->ProcessSample(left_input * gain, right_input * gain, &rev_l, &rev_r);
 
     // Apply algorithm-specific gain adjustments
     if (reverb.current_type == REVERB_HALL) {
@@ -1264,6 +1209,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     }
 
     if (!bypass.reverb) {
+      // left_output = ((left_input * reverb.dry * 0.1) + (verb.getLeftOutput() * reverb.wet * clearPopCancelValue));
+      // right_output = ((right_input * reverb.dry * 0.1) + (verb.getRightOutput() * reverb.wet * clearPopCancelValue));
       left_output = ((left_input * reverb.dry * reverb_reverse_scale_factor) + (rev_l * reverb.wet * clearPopCancelValue));
       right_output = ((right_input * reverb.dry * reverb_reverse_scale_factor) + (rev_r * reverb.wet * clearPopCancelValue));
 
@@ -1272,18 +1219,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     }
 
     if (mono_stereo_mode == MS_MODE_MIMO) {
-      float mono = ((s_L * 0.5f) + (s_R * 0.5f)) * polarity_L;
-      out[0][i]   = mono;
-      out[0][i+1] = mono;
-      out[1][i]   = 0.0f;
-      out[1][i+1] = 0.0f;
+      out[0][i] = ((s_L * 0.5f) + (s_R * 0.5f)) * polarity_L;
+      out[1][i] = 0.0f;
     } else {
-      float out_L = s_L * polarity_L;
-      float out_R = s_R * polarity_R;
-      out[0][i]   = out_L;
-      out[0][i+1] = out_L;
-      out[1][i]   = out_R;
-      out[1][i+1] = out_R;
+      out[0][i] = s_L * polarity_L;
+      out[1][i] = s_R * polarity_R;
     }
   }
 }
@@ -1352,11 +1292,8 @@ void runFactoryResetLoop() {
 
 int main() {
   hw.Init(true); // Init the CPU at full speed
-  // Run the codec at 96kHz with block size 4 to push the DMA/callback
-  // interference tone to 24kHz (above audible range).
-  // DSP processes every other sample for an effective 48kHz rate.
-  hw.SetAudioBlockSize(4);
-  hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_96KHZ);
+  hw.SetAudioBlockSize(8);  // Number of samples handled per callback
+  hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 
   // Initialize LEDs
   led_left.Init(hw.seed.GetPin(Funbox::LED_1), false);
@@ -1379,24 +1316,24 @@ int main() {
   p_trem_speed.Init(hw.knobs[Funbox::KNOB_2], TREMOLO_SPEED_MIN, TREMOLO_SPEED_MAX, Parameter::LINEAR);
   p_trem_depth.Init(hw.knobs[Funbox::KNOB_3], 0.0f, TREMOLO_DEPTH_SCALE, Parameter::LINEAR);
 
-  p_delay_time.Init(hw.knobs[Funbox::KNOB_4], SAMPLE_RATE * DELAY_TIME_MIN_SECONDS, MAX_DELAY, Parameter::LOGARITHMIC);
+  p_delay_time.Init(hw.knobs[Funbox::KNOB_4], hw.AudioSampleRate() * DELAY_TIME_MIN_SECONDS, MAX_DELAY, Parameter::LOGARITHMIC);
   p_delay_feedback.Init(hw.knobs[Funbox::KNOB_5], 0.0f, 1.0f, Parameter::LINEAR);
   p_delay_amt.Init(hw.knobs[Funbox::KNOB_6], 0.0f, 100.0f, Parameter::LINEAR);
 
   // Initialize delay effect
-  delay_effect.Init(SAMPLE_RATE, &delMemL, &delMemR);
+  delay_effect.Init(hw.AudioSampleRate(), &delMemL, &delMemR);
 
   // Initialize tremolo effects
-  sine_tremolo.Init(SAMPLE_RATE);
-  square_tremolo.Init(SAMPLE_RATE);
-  harmonic_tremolo.Init(SAMPLE_RATE);
+  sine_tremolo.Init(hw.AudioSampleRate());
+  square_tremolo.Init(hw.AudioSampleRate());
+  harmonic_tremolo.Init(hw.AudioSampleRate());
   current_tremolo = &sine_tremolo;  // Default
 
-  // Initialize notch filters to remove hardware interference tones (always active)
-  notch1_L.Init(NOTCH_1_FREQ, -30.0f, 20.0f, SAMPLE_RATE);
-  notch1_R.Init(NOTCH_1_FREQ, -30.0f, 20.0f, SAMPLE_RATE);
-  notch2_L.Init(NOTCH_2_FREQ, -30.0f, 20.0f, SAMPLE_RATE);
-  notch2_R.Init(NOTCH_2_FREQ, -30.0f, 20.0f, SAMPLE_RATE);
+  // Initialize notch filters to remove resonant frequencies (always active)
+  notch1_L.Init(NOTCH_1_FREQ, -30.0f, 40.0f, hw.AudioSampleRate());
+  notch1_R.Init(NOTCH_1_FREQ, -30.0f, 40.0f, hw.AudioSampleRate());
+  notch2_L.Init(NOTCH_2_FREQ, -30.0f, 40.0f, hw.AudioSampleRate());
+  notch2_R.Init(NOTCH_2_FREQ, -30.0f, 40.0f, hw.AudioSampleRate());
 
   //
   // Reverb Initialization (all three types)
@@ -1412,18 +1349,15 @@ int main() {
   hold = 1.0f;
 
   // Initialize Plate Reverb (Dattorro)
-  plate_reverb.Init(SAMPLE_RATE);
+  plate_reverb.Init(hw.AudioSampleRate());
   updatePlateReverbParameters();
 
   // Initialize Hall Reverb (Schroeder)
-  hall_reverb.Init(SAMPLE_RATE);
+  hall_reverb.Init(hw.AudioSampleRate());
   hall_reverb.SetDecay(0.95f); // Higher feedback for longer hall decay
 
-  // Initialize Spring Reverb (Digital Waveguide)
-  spring_reverb.Init(SAMPLE_RATE);
-  spring_reverb.SetDecay(0.7f); // Spring decay
-  spring_reverb.SetMix(1.0f);   // 100% wet - it'll be mixed with Knob 1
-  spring_reverb.SetDamping(7000.0f); // High-frequency damping
+  // Initialize Cloud Reverb (CloudSeed algorithm)
+  cloud_reverb.Init(hw.AudioSampleRate());
 
   // Set default active reverb
   current_reverb = &plate_reverb;
