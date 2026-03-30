@@ -106,10 +106,11 @@ constexpr float SAMPLE_RATE = 48000.0f;
 constexpr size_t MAX_DELAY = static_cast<size_t>(SAMPLE_RATE * 2.0f);
 
 // Notch filter constants (always active)
-// Target the Daisy Seed's DMA/codec interference tone at the callback rate
-// (sample_rate / block_size) and its first harmonic. The tone is primarily
-// analog-domain but the notch filters provide partial attenuation.
-constexpr float NOTCH_1_FREQ = 16134.0f;  // DMA/codec interference at 96kHz/6 callback rate
+// Target the Daisy Seed's hardware interference tones. These appear to be
+// analog-domain noise from DMA/codec activity, not tied to the current
+// callback rate. The notch filters provide partial attenuation.
+constexpr float NOTCH_1_FREQ = 6037.7f;    // Primary hardware interference tone
+constexpr float NOTCH_2_FREQ = 16000.0f;   // Secondary interference tone
 
 // Reverb constants (Dattorro plate reverb scaling)
 constexpr float PLATE_PRE_DELAY_SCALE = 0.25f;
@@ -389,6 +390,8 @@ DelayEffect delay_effect;
 // Notch filters to remove Daisy Seed resonant frequencies (always active)
 PeakingEQ notch1_L;
 PeakingEQ notch1_R;
+PeakingEQ notch2_L;
+PeakingEQ notch2_R;
 
 // ============================================================================
 // UI HARDWARE
@@ -1167,6 +1170,26 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   float polarity_L = (polarity_mode == POLARITY_INVERT_LEFT) ? -1.0f : 1.0f;
   float polarity_R = (polarity_mode == POLARITY_INVERT_RIGHT) ? -1.0f : 1.0f;
 
+  // Pre-compute values that are constant across all samples in this callback
+  float fdrywet = delay_drywet / 100.0f;
+  float delay_make_up_gain = makeup_gain == MAKEUP_GAIN_NONE ? 1.0f : 1.66f;
+  float trem_make_up_gain = makeup_gain == MAKEUP_GAIN_NONE ? 1.0f : 1.2f;
+  float reverb_gain = MINUS_18DB_GAIN * MINUS_20DB_GAIN * (1.0f + input_amplification * 7.0f) * clearPopCancelValue;
+
+  // Select active reverb algorithm and update parameters once per callback
+  switch (reverb.current_type) {
+    case REVERB_PLATE:
+      current_reverb = &plate_reverb;
+      updatePlateReverbParameters();
+      break;
+    case REVERB_SPRING:
+      current_reverb = &spring_reverb;
+      break;
+    case REVERB_HALL:
+      current_reverb = &hall_reverb;
+      break;
+  }
+
   // Process every other sample (96kHz codec → 48kHz effective DSP rate).
   for (size_t i = 0; i < size; i += 2) {
     float dry_L = in[0][i];
@@ -1181,14 +1204,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
       s_R = dry_R;
     }
 
-    // Apply notch filters for resonant frequencies
+    // Apply notch filters for hardware interference tones
     s_L = notch1_L.Process(s_L);
     s_R = notch1_R.Process(s_R);
+    s_L = notch2_L.Process(s_L);
+    s_R = notch2_R.Process(s_R);
 
     if (!bypass.delay) {
-      float fdrywet = delay_drywet / 100.0f;
-      float delay_make_up_gain = makeup_gain == MAKEUP_GAIN_NONE ? 1.0f : 1.66f;
-
       // Process delay effect (returns wet signal only)
       float wet_L, wet_R;
       delay_effect.ProcessSample(s_L, s_R, &wet_L, &wet_R);
@@ -1201,8 +1223,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
 
     {
       // Always process tremolo so the LFO stays in sync and we can crossfade
-      float trem_make_up_gain = makeup_gain == MAKEUP_GAIN_NONE ? 1.0f : 1.2f;
-
       float trem_out_L, trem_out_R;
       current_tremolo->ProcessSample(s_L, s_R, &trem_out_L, &trem_out_R);
       trem_val = current_tremolo->GetLastLFOValue();
@@ -1231,25 +1251,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     left_input = hardLimit100_(s_L) * reverb_dry_scale_factor;
     right_input = hardLimit100_(s_R) * reverb_dry_scale_factor;
 
-    float gain = MINUS_18DB_GAIN * MINUS_20DB_GAIN * (1.0f + input_amplification * 7.0f) * clearPopCancelValue;
     float rev_l, rev_r;
 
-    // Switch active reverb algorithm based on toggle switch
-    switch (reverb.current_type) {
-      case REVERB_PLATE:
-        current_reverb = &plate_reverb;
-        updatePlateReverbParameters(); // Update plate-specific parameters
-        break;
-      case REVERB_SPRING:
-        current_reverb = &spring_reverb;
-        break;
-      case REVERB_HALL:
-        current_reverb = &hall_reverb;
-        break;
-    }
-
     // Process reverb via polymorphic interface
-    current_reverb->ProcessSample(left_input * gain, right_input * gain, &rev_l, &rev_r);
+    current_reverb->ProcessSample(left_input * reverb_gain, right_input * reverb_gain, &rev_l, &rev_r);
 
     // Apply algorithm-specific gain adjustments
     if (reverb.current_type == REVERB_HALL) {
@@ -1259,8 +1264,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     }
 
     if (!bypass.reverb) {
-      // left_output = ((left_input * reverb.dry * 0.1) + (verb.getLeftOutput() * reverb.wet * clearPopCancelValue));
-      // right_output = ((right_input * reverb.dry * 0.1) + (verb.getRightOutput() * reverb.wet * clearPopCancelValue));
       left_output = ((left_input * reverb.dry * reverb_reverse_scale_factor) + (rev_l * reverb.wet * clearPopCancelValue));
       right_output = ((right_input * reverb.dry * reverb_reverse_scale_factor) + (rev_r * reverb.wet * clearPopCancelValue));
 
@@ -1349,11 +1352,10 @@ void runFactoryResetLoop() {
 
 int main() {
   hw.Init(true); // Init the CPU at full speed
-  // Run the codec at 96kHz with block size 6 to push the DMA/callback
-  // interference tone to 16kHz. Block size 4 causes DMA artifacts that
-  // IIR filters expose; block size 6 is the minimum for clean operation.
+  // Run the codec at 96kHz with block size 4 to push the DMA/callback
+  // interference tone to 24kHz (above audible range).
   // DSP processes every other sample for an effective 48kHz rate.
-  hw.SetAudioBlockSize(6);
+  hw.SetAudioBlockSize(4);
   hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_96KHZ);
 
   // Initialize LEDs
@@ -1390,9 +1392,11 @@ int main() {
   harmonic_tremolo.Init(SAMPLE_RATE);
   current_tremolo = &sine_tremolo;  // Default
 
-  // Initialize notch filters to remove resonant frequencies (always active)
+  // Initialize notch filters to remove hardware interference tones (always active)
   notch1_L.Init(NOTCH_1_FREQ, -30.0f, 20.0f, SAMPLE_RATE);
   notch1_R.Init(NOTCH_1_FREQ, -30.0f, 20.0f, SAMPLE_RATE);
+  notch2_L.Init(NOTCH_2_FREQ, -30.0f, 20.0f, SAMPLE_RATE);
+  notch2_R.Init(NOTCH_2_FREQ, -30.0f, 20.0f, SAMPLE_RATE);
 
   //
   // Reverb Initialization (all three types)
