@@ -62,7 +62,6 @@
 #include "tremolo_effect.h"
 #include "reverb_effect.h"
 #include "plate_reverb.h"
-#include "cloud_reverb.h"
 #include "parameter_capture.h"
 #include <math.h>
 
@@ -77,7 +76,6 @@ using flick::SquareTremolo;
 using flick::HarmonicTremolo;
 using flick::ReverbEffect;
 using flick::PlateReverb;
-using flick::CloudReverb;
 using flick::Funbox;
 using flick::KnobCapture;
 using flick::SwitchCapture;
@@ -96,7 +94,7 @@ using daisysp::fonepole;
 
 /// Increment this when changing the settings struct so the software will know
 /// to reset to defaults if this ever changes.
-#define SETTINGS_VERSION 11
+#define SETTINGS_VERSION 13
 
 // Audio configuration
 constexpr float SAMPLE_RATE = 48000.0f;
@@ -177,27 +175,14 @@ constexpr MonoStereoMode kMonoStereoMap[] = {
 // Reverb algorithm selection (Toggle Switch 1 in normal mode)
 enum ReverbType {
   REVERB_PLATE,
-  REVERB_CLOUD,
+  REVERB_AMBIENT,
   REVERB_ROOM,
 };
 
 constexpr ReverbType kReverbTypeMap[] = {
-  REVERB_CLOUD,   // UP (Hothouse) / RIGHT (Funbox) — CloudSeed ambient
+  REVERB_AMBIENT,   // UP (Hothouse) / RIGHT (Funbox) — ambient
   REVERB_PLATE,   // MIDDLE — Dattorro plate
-  REVERB_ROOM,    // DOWN (Hothouse) / LEFT (Funbox) — CloudSeed room
-};
-
-// Reverb dry/wet knob behavior (Toggle Switch 1 in device settings)
-enum ReverbKnobMode {
-  REVERB_KNOB_ALL_DRY,
-  REVERB_KNOB_DRY_WET_MIX,
-  REVERB_KNOB_ALL_WET,
-};
-
-constexpr ReverbKnobMode kReverbKnobMap[] = {
-  REVERB_KNOB_ALL_DRY,     // UP (Hothouse) / RIGHT (Funbox)
-  REVERB_KNOB_DRY_WET_MIX, // MIDDLE
-  REVERB_KNOB_ALL_WET,      // DOWN (Hothouse) / LEFT (Funbox)
+  REVERB_ROOM,    // DOWN (Hothouse) / LEFT (Funbox) — room
 };
 
 // Tremolo algorithm selection (Toggle Switch 2 in normal mode)
@@ -278,13 +263,12 @@ struct Settings {
   int version; // Version of the settings struct
 
   // Per-reverb edit parameters (one set per reverb type)
-  ReverbEditParams ambient_params;  // CloudSeed ambient (toggle UP)
+  ReverbEditParams ambient_params;  // ambient (toggle UP)
   ReverbEditParams plate_params;    // Dattorro plate (toggle MIDDLE)
-  ReverbEditParams room_params;     // CloudSeed room (toggle DOWN)
+  ReverbEditParams room_params;     // room (toggle DOWN)
 
   int mono_stereo_mode;
   int polarity_mode;
-  int reverb_knob_mode;
   bool bypass_reverb;
   bool bypass_tremolo;
   bool bypass_delay;
@@ -300,7 +284,6 @@ struct Settings {
       a.room_params == room_params &&
       a.mono_stereo_mode == mono_stereo_mode &&
       a.polarity_mode == polarity_mode &&
-      a.reverb_knob_mode == reverb_knob_mode &&
       a.bypass_reverb == bypass_reverb &&
       a.bypass_tremolo == bypass_tremolo &&
       a.bypass_delay == bypass_delay &&
@@ -331,26 +314,19 @@ struct ReverbOrchestrator {
   // Locked reverb type during edit mode (prevents switching mid-edit)
   ReverbType edit_type = REVERB_PLATE;
 
-  // Which CloudSeed preset is currently loaded (lags current_type until the
-  // main loop applies the deferred preset switch)
-  ReverbType loaded_cloud_type = REVERB_CLOUD;
-
-  // Reverb knob mode (device setting - affects dry/wet mixing behavior)
-  ReverbKnobMode knob_mode = REVERB_KNOB_DRY_WET_MIX;
-
   // Mixing control (orchestrator responsibility - dry/wet balance)
   float dry = 1.0f;
   float wet = 0.5f;
 
   // Per-reverb editable parameters (saved to flash, edited in reverb edit mode)
-  ReverbEditParams ambient = {0.0f, 0.83f, 0.8f, 0.055f, 0.715f};
+  ReverbEditParams ambient = {0.5f, 0.8f, 0.725f, 0.5f, 0.9f};
   ReverbEditParams plate   = {0.0f, 0.8f, 0.725f, 0.0f, 0.85f};
-  ReverbEditParams room    = {0.0f, 0.4f, 0.8f, 0.19f, 0.595f};
+  ReverbEditParams room    = {0.0f, 0.4f, 0.725f, 0.0f, 0.4f};
 
   // Get params for a given reverb type
   ReverbEditParams& paramsForType(ReverbType type) {
     switch (type) {
-      case REVERB_CLOUD: return ambient;
+      case REVERB_AMBIENT: return ambient;
       case REVERB_ROOM:  return room;
       default:           return plate;
     }
@@ -378,8 +354,6 @@ DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS delMemR;
 // current_reverb points to whichever reverb is active (plate or cloud)
 ReverbEffect* current_reverb = nullptr;
 PlateReverb plate_reverb;    // Dattorro algorithm (lush, complex)
-CloudReverb cloud_reverb;    // CloudSeed (single instance, switches preset for ambient/room)
-
 // Tremolo effects (polymorphic - switch at runtime)
 TremoloEffect* current_tremolo = nullptr;
 SineTremolo sine_tremolo;
@@ -554,19 +528,11 @@ inline void updateReverbScales(MonoStereoMode mode) {
  * Called during edit mode processing, on settings load, and on settings restore.
  */
 void applyReverbEditParams(ReverbType type, const ReverbEditParams& params) {
-  ReverbEffect* target = nullptr;
-  switch (type) {
-    case REVERB_CLOUD: target = &cloud_reverb; break;
-    case REVERB_PLATE: target = &plate_reverb; break;
-    case REVERB_ROOM:  target = &cloud_reverb; break;
-  }
-  if (target) {
-    target->SetPreDelay(params.pre_delay);
-    target->SetDecay(params.decay);
-    target->SetTone(params.tone);
-    target->SetModulation(params.modulation);
-    target->SetDiffusion(params.diffusion);
-  }
+  plate_reverb.SetPreDelay(params.pre_delay);
+  plate_reverb.SetDecay(params.decay);
+  plate_reverb.SetTone(params.tone);
+  plate_reverb.SetModulation(params.modulation);
+  plate_reverb.SetDiffusion(params.diffusion);
 }
 
 // ============================================================================
@@ -593,7 +559,6 @@ void loadSettings() {
 
   mono_stereo_mode = static_cast<MonoStereoMode>(local_settings.mono_stereo_mode);
   polarity_mode = static_cast<PolarityMode>(local_settings.polarity_mode);
-  reverb.knob_mode = static_cast<ReverbKnobMode>(local_settings.reverb_knob_mode);
   updateReverbScales(mono_stereo_mode);
 
   bypass.reverb = local_settings.bypass_reverb;
@@ -604,9 +569,8 @@ void loadSettings() {
   // Apply loaded parameters to reverb effects. For CloudSeed, only apply
   // params matching the currently loaded preset (the other type's params are
   // stored in the ReverbOrchestrator and applied when the preset switches).
-  applyReverbEditParams(reverb.loaded_cloud_type, reverb.paramsForType(reverb.loaded_cloud_type));
-  applyReverbEditParams(REVERB_PLATE, reverb.plate);
-}
+  applyReverbEditParams(reverb.current_type, reverb.paramsForType(reverb.current_type));
+  }
 
 void saveReverbSettings() {
   Settings &local_settings = SavedSettings.GetSettings();
@@ -624,7 +588,6 @@ void saveDeviceSettings() {
 
   local_settings.mono_stereo_mode = mono_stereo_mode;
   local_settings.polarity_mode = polarity_mode;
-  local_settings.reverb_knob_mode = reverb.knob_mode;
 
   trigger_settings_save = true;
 }
@@ -658,7 +621,6 @@ void restoreDeviceSettings() {
 
   mono_stereo_mode = static_cast<MonoStereoMode>(local_settings.mono_stereo_mode);
   polarity_mode = static_cast<PolarityMode>(local_settings.polarity_mode);
-  reverb.knob_mode = static_cast<ReverbKnobMode>(local_settings.reverb_knob_mode);
   updateReverbScales(mono_stereo_mode);
 }
 
@@ -918,7 +880,6 @@ void handleLongPress(Funbox::Switches footswitch) {
     pedal_mode = PEDAL_MODE_EDIT_REVERB;
   } else if (footswitch == Funbox::FOOTSWITCH_2) {
     // FOOTSWITCH_2 long press: Enter device settings.
-    p_sw1_capture.Capture(switchPosForValue(kReverbKnobMap, reverb.knob_mode));
     p_sw2_capture.Capture(switchPosForValue(kPolarityMap, polarity_mode));
     p_sw3_capture.Capture(switchPosForValue(kMonoStereoMap, mono_stereo_mode));
     pedal_mode = PEDAL_MODE_EDIT_DEVICE_SETTINGS;
@@ -1107,16 +1068,16 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     delay_effect.SetFeedback(p_delay_feedback.Process());
     delay_drywet = (int)p_delay_amt.Process();
 
-    // Reverb dry/wet mode (from saved setting)
-    switch (reverb.knob_mode) {
-      case REVERB_KNOB_ALL_DRY:
-        reverb.dry = 1.0f;
+    // Reverb dry/wet mode (from hardcoded mapping)
+    switch (reverb.current_type) {
+      case REVERB_AMBIENT:
+        reverb.dry = 0.0f;
         break;
-      case REVERB_KNOB_DRY_WET_MIX:
+      case REVERB_PLATE:
         reverb.dry = 1.0f - reverb.wet;
         break;
-      case REVERB_KNOB_ALL_WET:
-        reverb.dry = 0.0f;
+      case REVERB_ROOM:
+        reverb.dry = 1.0f;
         break;
     }
   } else if (pedal_mode == PEDAL_MODE_EDIT_REVERB) {
@@ -1147,22 +1108,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   } else if (pedal_mode == PEDAL_MODE_EDIT_DEVICE_SETTINGS) {
     // Device settings mode with switch capture (soft takeover)
 
-    // SW1: Reverb wet/dry mode
-    reverb.knob_mode = kReverbKnobMap[p_sw1_capture.Process()];
-
-    // Apply reverb dry/wet so changes are audible in settings mode
-    switch (reverb.knob_mode) {
-      case REVERB_KNOB_ALL_DRY:
-        reverb.dry = 1.0f;
-        break;
-      case REVERB_KNOB_DRY_WET_MIX:
-        reverb.dry = 1.0f - reverb.wet;
-        break;
-      case REVERB_KNOB_ALL_WET:
-        reverb.dry = 0.0f;
-        break;
-    }
-
     // SW2: Polarity mode
     polarity_mode = kPolarityMap[p_sw2_capture.Process()];
 
@@ -1174,24 +1119,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
   float polarity_L = (polarity_mode == POLARITY_INVERT_LEFT) ? -1.0f : 1.0f;
   float polarity_R = (polarity_mode == POLARITY_INVERT_RIGHT) ? -1.0f : 1.0f;
 
-  // Resolve active reverb pointer once per callback (reverb.current_type does
-  // not change within a callback). For CloudSeed types, request a deferred
-  // preset switch if the loaded preset doesn't match the selected type.
-  switch (reverb.current_type) {
-    case REVERB_PLATE:
-      current_reverb = &plate_reverb;
-      break;
-    case REVERB_CLOUD:
-    case REVERB_ROOM:
-      current_reverb = &cloud_reverb;
-      if (reverb.current_type != reverb.loaded_cloud_type &&
-          !cloud_reverb.HasPendingPresetSwitch()) {
-        auto cloud_type = (reverb.current_type == REVERB_CLOUD)
-            ? CloudReverb::CLOUD_AMBIENT : CloudReverb::CLOUD_ROOM;
-        cloud_reverb.RequestTypeSwitch(cloud_type);
-      }
-      break;
+  static ReverbType last_reverb_type = REVERB_PLATE;
+  if (reverb.current_type != last_reverb_type) {
+    applyReverbEditParams(reverb.current_type, reverb.paramsForType(reverb.current_type));
+    last_reverb_type = reverb.current_type;
   }
+  current_reverb = &plate_reverb;
+
 
   // Process every other sample (96kHz codec -> 48kHz effective DSP rate).
   for (size_t i = 0; (i + 1) < size; i += 2) {
@@ -1407,19 +1341,13 @@ int main() {
   // Initialize Plate Reverb (Dattorro)
   plate_reverb.Init(hw.AudioSampleRate());
 
-  // Initialize CloudSeed Reverb (single instance, preset switched at runtime)
-  cloud_reverb.Init(hw.AudioSampleRate());
-  cloud_reverb.SetPreset(5);         // Start with Rubi-Ka Fields (ambient)
-  cloud_reverb.SetOutputGain(1.5f);
-  reverb.loaded_cloud_type = REVERB_CLOUD;
-
   // Set default active reverb
   current_reverb = &plate_reverb;
 
   // Default per-reverb edit parameters (matching preset values)
-  ReverbEditParams default_ambient = {0.0f, 0.83f, 0.8f, 0.055f, 0.715f};
+  ReverbEditParams default_ambient = {0.0f, 1.6f, 0.725f, 0.0f, 1.7f};
   ReverbEditParams default_plate   = {0.0f, 0.8f, 0.725f, 0.0f, 0.85f};
-  ReverbEditParams default_room    = {0.0f, 0.4f, 0.8f, 0.19f, 0.595f};
+  ReverbEditParams default_room    = {0.0f, 0.4f, 0.725f, 0.0f, 0.425f};
 
   Settings defaultSettings = {
     SETTINGS_VERSION,               // version
@@ -1428,7 +1356,6 @@ int main() {
     default_room,                   // room_params
     MS_MODE_MIMO,                   // mono_stereo_mode
     POLARITY_NORMAL,                // polarity_mode
-    REVERB_KNOB_DRY_WET_MIX,       // reverb_knob_mode
     true,                           // bypass_reverb
     true,                           // bypass_tremolo
     true,                           // bypass_delay
@@ -1442,7 +1369,6 @@ int main() {
   // is loaded at this point; room params will be applied when the user
   // switches to the room reverb type.
   loadSettings();
-  cloud_reverb.ApplyPendingParams();
 
   Funbox::FootswitchCallbacks callbacks = {
     .HandleNormalPress = handleNormalPress,
@@ -1500,20 +1426,7 @@ int main() {
     } else if (is_factory_reset_mode) {
       runFactoryResetLoop();
     }
-
-    // Apply deferred CloudSeed preset switches and parameter changes outside
-    // the audio ISR. CloudSeed's SetParameter triggers SHA-256 hashing and
-    // biquad coefficient recalculation — too expensive for the audio callback.
-    if (cloud_reverb.HasPendingPresetSwitch()) {
-      cloud_reverb.ApplyPendingPresetSwitch();
-      reverb.loaded_cloud_type = reverb.current_type;
-      // Re-apply saved edit params for the newly loaded preset
-      applyReverbEditParams(reverb.loaded_cloud_type,
-                            reverb.paramsForType(reverb.loaded_cloud_type));
-      cloud_reverb.ApplyPendingParams();
-    }
-    cloud_reverb.ApplyPendingParams();
-
+  
     hw.DelayMs(10);
   }
   return 0;

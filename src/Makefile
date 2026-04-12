@@ -7,10 +7,10 @@ PLATFORM ?= funbox
 #USE_DAISYSP_LGPL=1
 
 # Base sources (common to all platforms)
-CPP_SOURCES = flick.cpp delay_effect.cpp tremolo_effect.cpp plate_reverb.cpp cloud_reverb.cpp flick_oscillator.cpp daisy_hardware.cpp parameter_capture.cpp
+CPP_SOURCES = flick.cpp delay_effect.cpp tremolo_effect.cpp plate_reverb.cpp flick_oscillator.cpp daisy_hardware.cpp parameter_capture.cpp
 
 # Base includes
-C_INCLUDES = -I.. -I./PlateauNEVersio -I./CloudSeed
+C_INCLUDES = -I.. -I./PlateauNEVersio
 
 # Platform guard
 ifneq ($(PLATFORM),funbox)
@@ -23,12 +23,6 @@ endif
 C_DEFS += -DPLATFORM=$(PLATFORM)
 C_DEFS += -DPLATFORM_$(PLATFORM)=1
 
-# Add CloudSeed sources
-CPP_SOURCES += CloudSeed/FastSin.cpp
-CPP_SOURCES += CloudSeed/AudioLib/Biquad.cpp
-CPP_SOURCES += CloudSeed/AudioLib/ShaRandom.cpp
-CPP_SOURCES += CloudSeed/AudioLib/ValueTables.cpp
-CPP_SOURCES += CloudSeed/Utils/Sha256.cpp
 
 # Add PlateauNEVersio sources
 CPP_SOURCES += PlateauNEVersio/utilities/Utilities.cpp
