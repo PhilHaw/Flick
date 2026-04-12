@@ -94,7 +94,7 @@ using daisysp::fonepole;
 
 /// Increment this when changing the settings struct so the software will know
 /// to reset to defaults if this ever changes.
-#define SETTINGS_VERSION 13
+#define SETTINGS_VERSION 15
 
 // Audio configuration
 constexpr float SAMPLE_RATE = 48000.0f;
@@ -319,7 +319,7 @@ struct ReverbOrchestrator {
   float wet = 0.5f;
 
   // Per-reverb editable parameters (saved to flash, edited in reverb edit mode)
-  ReverbEditParams ambient = {0.5f, 0.8f, 0.725f, 0.5f, 0.9f};
+  ReverbEditParams ambient = {0.0f, 0.98f, 0.725f, 0.0f, 0.98f};
   ReverbEditParams plate   = {0.0f, 0.8f, 0.725f, 0.0f, 0.85f};
   ReverbEditParams room    = {0.0f, 0.4f, 0.725f, 0.0f, 0.4f};
 
@@ -1082,7 +1082,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     }
   } else if (pedal_mode == PEDAL_MODE_EDIT_REVERB) {
     // Edit mode: knobs 2-6 control the locked reverb type's parameters
-    reverb.dry = 1.0f; // Always use dry 100% in edit mode
+    switch (reverb.edit_type) {
+      case REVERB_AMBIENT:
+        reverb.dry = 0.0f; // ALL WET
+        break;
+      case REVERB_PLATE:
+        reverb.dry = 1.0f - reverb.wet; // DRY WET MIX
+        break;
+      case REVERB_ROOM:
+        reverb.dry = 1.0f; // ALL DRY
+        break;
+    }
 
     ReverbEditParams& params = reverb.paramsForType(reverb.edit_type);
     float v;
@@ -1345,7 +1355,7 @@ int main() {
   current_reverb = &plate_reverb;
 
   // Default per-reverb edit parameters (matching preset values)
-  ReverbEditParams default_ambient = {0.0f, 1.6f, 0.725f, 0.0f, 1.7f};
+  ReverbEditParams default_ambient = {0.0f, 0.98f, 0.725f, 0.0f, 0.98f};
   ReverbEditParams default_plate   = {0.0f, 0.8f, 0.725f, 0.0f, 0.85f};
   ReverbEditParams default_room    = {0.0f, 0.4f, 0.725f, 0.0f, 0.425f};
 
