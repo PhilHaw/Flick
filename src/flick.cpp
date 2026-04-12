@@ -870,6 +870,18 @@ void handleLongPress(Funbox::Switches footswitch) {
     reverb.edit_type = reverb.current_type;
     ReverbEditParams& params = reverb.paramsForType(reverb.edit_type);
 
+    // Warm up the parameter smoothing filters before capturing. Since these
+    // parameters are not processed in normal mode, their internal filters
+    // are stale. Without this warmup, they will "catch up" during the first
+    // few callbacks in edit mode, triggering false movement detection.
+    for (int i = 0; i < 32; i++) {
+      p_knob_2.Process();
+      p_knob_3.Process();
+      p_knob_4.Process();
+      p_knob_5.Process();
+      p_knob_6.Process();
+    }
+
     p_knob_2_capture.Capture(params.pre_delay);
     p_knob_3_capture.Capture(params.decay);
     p_knob_4_capture.Capture(params.tone);
@@ -877,6 +889,8 @@ void handleLongPress(Funbox::Switches footswitch) {
     p_knob_6_capture.Capture(params.diffusion);
 
     bypass.reverb = false; // Make sure that reverb is ON
+    bypass.tremolo = true; // Turn off tremolo while editing reverb
+    saveBypassStates();
     pedal_mode = PEDAL_MODE_EDIT_REVERB;
   } else if (footswitch == Funbox::FOOTSWITCH_2) {
     // FOOTSWITCH_2 long press: Enter device settings.
