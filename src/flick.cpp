@@ -93,7 +93,7 @@ using daisysp::fonepole;
 
 /// Increment this when changing the settings struct so the software will know
 /// to reset to defaults if this ever changes.
-#define SETTINGS_VERSION 16
+#define SETTINGS_VERSION 17
 
 // Audio configuration
 constexpr float SAMPLE_RATE = 48000.0f;
@@ -257,6 +257,12 @@ struct ReverbEditParams {
   }
 };
 
+// Default per-reverb edit parameters — single source of truth for factory defaults.
+// Used by ReverbOrchestrator (in-memory baseline) and defaultSettings in main() (flash baseline).
+constexpr ReverbEditParams kDefaultAmbientParams = {0.0f, 0.85f, 0.725f, 0.2f,  0.9f};
+constexpr ReverbEditParams kDefaultPlateParams   = {0.0f, 0.8f,  0.725f, 0.0f,  0.85f};
+constexpr ReverbEditParams kDefaultRoomParams    = {0.0f, 0.4f,  0.725f, 0.0f,  0.425f};
+
 // Persistent settings stored in QSPI flash
 struct Settings {
   int version; // Version of the settings struct
@@ -317,10 +323,12 @@ struct ReverbOrchestrator {
   float dry = 1.0f;
   float wet = 0.5f;
 
-  // Per-reverb editable parameters (saved to flash, edited in reverb edit mode)
-  ReverbEditParams ambient = {0.0f, 0.8f, 0.725f, 0.5f, 0.85f};
-  ReverbEditParams plate   = {0.0f, 0.8f, 0.725f, 0.0f, 0.85f};
-  ReverbEditParams room    = {0.1f, 0.4f, 0.725f, 0.0f, 0.4f};
+  // Per-reverb editable parameters (saved to flash, edited in reverb edit mode).
+  // Initialised from kDefault*Params so they match the flash defaults.
+  // In practice, loadSettings() always overwrites these from flash before audio starts.
+  ReverbEditParams ambient = kDefaultAmbientParams;
+  ReverbEditParams plate   = kDefaultPlateParams;
+  ReverbEditParams room    = kDefaultRoomParams;
 
   // Get params for a given reverb type
   ReverbEditParams& paramsForType(ReverbType type) {
@@ -521,10 +529,11 @@ inline void updateReverbScales(MonoStereoMode mode) {
 }
 
 /**
- * @brief Apply unified edit parameters to the appropriate reverb effect.
- * Called during edit mode processing, on settings load, and on settings restore.
+ * @brief Apply unified edit parameters to the plate reverb effect.
+ * Called on settings load, settings restore, reverb type change (normal mode),
+ * and reverb edit mode entry.
  */
-void applyReverbEditParams(ReverbType type, const ReverbEditParams& params) {
+void applyReverbEditParams(const ReverbEditParams& params) {
   plate_reverb.SetPreDelay(params.pre_delay);
   plate_reverb.SetDecay(params.decay);
   plate_reverb.SetTone(params.tone);
@@ -563,10 +572,10 @@ void loadSettings() {
   bypass.delay = local_settings.bypass_delay;
   tap_tempo.tapped_delay_samples = local_settings.tapped_delay_samples;
 
-  // Apply loaded parameters to reverb effects. For CloudSeed, only apply
-  // params matching the currently loaded preset (the other type's params are
-  // stored in the ReverbOrchestrator and applied when the preset switches).
-  applyReverbEditParams(reverb.current_type, reverb.paramsForType(reverb.current_type));
+  // Apply the current type's params to plate_reverb. This handles the PLATE
+  // case (where the first-callback last_reverb_type check won't fire). For
+  // AMBIENT/ROOM, the check will apply the correct params on the first callback.
+  applyReverbEditParams(reverb.paramsForType(reverb.current_type));
   }
 
 void saveReverbSettings() {
@@ -609,7 +618,7 @@ void restoreReverbSettings() {
   reverb.room = local_settings.room_params;
 
   // Re-apply to the effect that was being edited
-  applyReverbEditParams(reverb.edit_type, reverb.paramsForType(reverb.edit_type));
+  applyReverbEditParams(reverb.paramsForType(reverb.edit_type));
 }
 
 /// @brief Restore the device settings from the saved settings.
@@ -877,14 +886,22 @@ void handleLongPress(Funbox::Switches footswitch) {
       p_knob_6.Process();
     }
 
+    // Explicitly apply the locked type's params to plate_reverb, ensuring it is
+    // in a known state when edit mode begins regardless of when the
+    // last_reverb_type check last fired.
+    applyReverbEditParams(params);
+
     p_knob_2_capture.Capture(params.pre_delay);
     p_knob_3_capture.Capture(params.decay);
     p_knob_4_capture.Capture(params.tone);
     p_knob_5_capture.Capture(params.modulation);
     p_knob_6_capture.Capture(params.diffusion);
 
-    bypass.reverb = false; // Make sure that reverb is ON
-    bypass.tremolo = true; // Turn off tremolo while editing reverb
+    bypass.reverb = false; // Ensure reverb is audible during editing
+    bypass.tremolo = true; // Counteract the accidental toggle from the single press
+                           // that fires before the long press is detected (~300ms
+                           // double-press window vs ~500ms long-press threshold).
+                           // This always lands in the same place: tremolo OFF.
     saveBypassStates();
     pedal_mode = PEDAL_MODE_EDIT_REVERB;
   } else if (footswitch == Funbox::FOOTSWITCH_2) {
@@ -1089,6 +1106,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
         reverb.dry = 1.0f;
         break;
     }
+
+    // When the reverb type changes (switch moved, or first callback after boot),
+    // apply the new type's saved parameters to plate_reverb.
+    static ReverbType last_reverb_type = REVERB_PLATE;
+    if (reverb.current_type != last_reverb_type) {
+      applyReverbEditParams(reverb.paramsForType(reverb.current_type));
+      last_reverb_type = reverb.current_type;
+    }
   } else if (pedal_mode == PEDAL_MODE_EDIT_REVERB) {
     // Edit mode: knobs 2-6 control the locked reverb type's parameters
     switch (reverb.edit_type) {
@@ -1106,9 +1131,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     ReverbEditParams& params = reverb.paramsForType(reverb.edit_type);
     float v;
 
-    // Apply only the specific parameter that changed — CloudSeed reacts
-    // poorly to multiple SetParameter calls at once (causes audio glitches
-    // from abrupt internal state changes, especially on delay-based params).
+    // Apply only the specific parameter that changed to avoid unnecessary
+    // writes to plate_reverb's internal state.
     v = p_knob_2_capture.Process();
     if (v != params.pre_delay) { params.pre_delay = v; plate_reverb.SetPreDelay(v); }
 
@@ -1137,13 +1161,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
 
   float polarity_L = (polarity_mode == POLARITY_INVERT_LEFT) ? -1.0f : 1.0f;
   float polarity_R = (polarity_mode == POLARITY_INVERT_RIGHT) ? -1.0f : 1.0f;
-
-  static ReverbType last_reverb_type = REVERB_PLATE;
-  if (reverb.current_type != last_reverb_type) {
-    applyReverbEditParams(reverb.current_type, reverb.paramsForType(reverb.current_type));
-    last_reverb_type = reverb.current_type;
-  }
-
 
   // Process every other sample (96kHz codec -> 48kHz effective DSP rate).
   for (size_t i = 0; (i + 1) < size; i += 2) {
@@ -1357,16 +1374,11 @@ int main() {
   // Initialize Plate Reverb (Dattorro)
   plate_reverb.Init(hw.AudioSampleRate());
 
-  // Default per-reverb edit parameters (matching preset values)
-  ReverbEditParams default_ambient = {0.0f, 0.98f, 0.725f, 0.0f, 0.98f};
-  ReverbEditParams default_plate   = {0.0f, 0.8f, 0.725f, 0.0f, 0.85f};
-  ReverbEditParams default_room    = {0.0f, 0.4f, 0.725f, 0.0f, 0.425f};
-
   Settings defaultSettings = {
     SETTINGS_VERSION,               // version
-    default_ambient,                // ambient_params
-    default_plate,                  // plate_params
-    default_room,                   // room_params
+    kDefaultAmbientParams,          // ambient_params
+    kDefaultPlateParams,            // plate_params
+    kDefaultRoomParams,             // room_params
     MS_MODE_MIMO,                   // mono_stereo_mode
     POLARITY_NORMAL,                // polarity_mode
     true,                           // bypass_reverb
