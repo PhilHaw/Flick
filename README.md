@@ -38,8 +38,8 @@ Feature demo video (28 June 2025):
 | SWITCH 1 | Reverb Type | **LOW** - Room<br/>**MID** - Plate<br/>**HIGH** - Ambient |
 | SWITCH 2 | Tremolo Type | **LOW** - Smooth<br/>**MID** - Harmonic<br/>**HIGH** - Opto |
 | SWITCH 3 | Delay Timing | **LOW** - Triplet (1/3)<br/>**MID** - Quarter (straight)<br/>**HIGH** - Dotted Eighth (3/4) |
-| FOOTSWITCH 1 | Tremolo/Reverb | Normal press toggles tremolo on/off.<br/>Double press toggles reverb on/off.<br/>Long press enters Reverb Edit Mode (see below).<br/><br/>**LED 1:**<br/>- 100% when only reverb is active<br/>- 40% pulsing when only tremolo is active<br/>- 100% pulsing when both are active |
-| FOOTSWITCH 2 | Delay/Tap Tempo | Normal press toggles delay on/off.<br/>Double press enters Tap Tempo mode (see below).<br/>Long press for Device Settings (see below).<br/><br/>**LED 2:**<br/>- Pulsing at the quarter-note delay tempo when delay is active<br/>- Off when delay is not active |
+| FOOTSWITCH 1 | Tremolo/Reverb | Normal press toggles tremolo on/off.<br/>Double press toggles reverb on/off.<br/>Long press enters Reverb Edit Mode (see below).<br/><br/>**LED 1:**<br/>- 100% when only reverb is active<br/>- 100% pulsing when only tremolo is active<br/>- 100% pulsing when both are active |
+| FOOTSWITCH 2 | Delay/Tap Tempo | Normal press toggles delay on/off.<br/>Double press enters Tap Tempo mode (see below).<br/>Long press for Device Settings (see below).<br/><br/>**LED 2:**<br/>- Pulsing at the active delay time when delay is active (knob or tap tempo)<br/>- Off when delay is not active |
 
 ### Controls (Tap Tempo Mode)
 *LED 2 flashes at tapped tempo. LED 1 shows reverb/tremolo status as normal.*
