@@ -34,7 +34,6 @@
  *   - HarmonicTremolo: Band-split with opposite-phase modulation + EQ
  * - ReverbEffect:     Base class for reverb algorithms (reverb_effect.h)
  *   - PlateReverb:    Dattorro algorithm (plate_reverb.h/cpp)
- *   - CloudReverb:    CloudSeed algorithm (cloud_reverb.h/cpp) — used for both ambient and room
  *
  * ORCHESTRATOR RESPONSIBILITIES:
  * - Read hardware controls (knobs, switches, footswitches)
@@ -94,7 +93,7 @@ using daisysp::fonepole;
 
 /// Increment this when changing the settings struct so the software will know
 /// to reset to defaults if this ever changes.
-#define SETTINGS_VERSION 15
+#define SETTINGS_VERSION 16
 
 // Audio configuration
 constexpr float SAMPLE_RATE = 48000.0f;
@@ -319,9 +318,9 @@ struct ReverbOrchestrator {
   float wet = 0.5f;
 
   // Per-reverb editable parameters (saved to flash, edited in reverb edit mode)
-  ReverbEditParams ambient = {0.0f, 0.98f, 0.725f, 0.0f, 0.98f};
+  ReverbEditParams ambient = {0.0f, 0.8f, 0.725f, 0.5f, 0.85f};
   ReverbEditParams plate   = {0.0f, 0.8f, 0.725f, 0.0f, 0.85f};
-  ReverbEditParams room    = {0.0f, 0.4f, 0.725f, 0.0f, 0.4f};
+  ReverbEditParams room    = {0.1f, 0.4f, 0.725f, 0.0f, 0.4f};
 
   // Get params for a given reverb type
   ReverbEditParams& paramsForType(ReverbType type) {
@@ -350,9 +349,7 @@ PersistentStorage<Settings> SavedSettings(hw.seed.qspi);
 DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS delMemL;
 DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS delMemR;
 
-// Reverb effects (polymorphic - algorithm selected at runtime via toggle switch)
-// current_reverb points to whichever reverb is active (plate or cloud)
-ReverbEffect* current_reverb = nullptr;
+// Reverb effects
 PlateReverb plate_reverb;    // Dattorro algorithm (lush, complex)
 // Tremolo effects (polymorphic - switch at runtime)
 TremoloEffect* current_tremolo = nullptr;
@@ -818,9 +815,7 @@ void handleDoublePress(Funbox::Switches footswitch) {
     if (bypass.reverb) {
       // Clear the reverb tails when the reverb is bypassed so if you
       // turn it back on, it starts fresh and doesn't sound weird.
-      if (current_reverb != nullptr) {
-        current_reverb->Clear();
-      }
+      plate_reverb.Clear();
     }
 
     saveBypassStates();
@@ -1115,19 +1110,19 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     // poorly to multiple SetParameter calls at once (causes audio glitches
     // from abrupt internal state changes, especially on delay-based params).
     v = p_knob_2_capture.Process();
-    if (v != params.pre_delay) { params.pre_delay = v; current_reverb->SetPreDelay(v); }
+    if (v != params.pre_delay) { params.pre_delay = v; plate_reverb.SetPreDelay(v); }
 
     v = p_knob_3_capture.Process();
-    if (v != params.decay) { params.decay = v; current_reverb->SetDecay(v); }
+    if (v != params.decay) { params.decay = v; plate_reverb.SetDecay(v); }
 
     v = p_knob_4_capture.Process();
-    if (v != params.tone) { params.tone = v; current_reverb->SetTone(v); }
+    if (v != params.tone) { params.tone = v; plate_reverb.SetTone(v); }
 
     v = p_knob_5_capture.Process();
-    if (v != params.modulation) { params.modulation = v; current_reverb->SetModulation(v); }
+    if (v != params.modulation) { params.modulation = v; plate_reverb.SetModulation(v); }
 
     v = p_knob_6_capture.Process();
-    if (v != params.diffusion) { params.diffusion = v; current_reverb->SetDiffusion(v); }
+    if (v != params.diffusion) { params.diffusion = v; plate_reverb.SetDiffusion(v); }
 
   } else if (pedal_mode == PEDAL_MODE_EDIT_DEVICE_SETTINGS) {
     // Device settings mode with switch capture (soft takeover)
@@ -1148,7 +1143,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     applyReverbEditParams(reverb.current_type, reverb.paramsForType(reverb.current_type));
     last_reverb_type = reverb.current_type;
   }
-  current_reverb = &plate_reverb;
 
 
   // Process every other sample (96kHz codec -> 48kHz effective DSP rate).
@@ -1210,12 +1204,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     float gain = MINUS_18DB_GAIN * MINUS_20DB_GAIN * (1.0f + input_amplification * 7.0f) * clearPopCancelValue;
     float rev_l, rev_r;
 
-    // Process reverb via polymorphic interface
-    current_reverb->ProcessSample(left_input * gain, right_input * gain, &rev_l, &rev_r);
+    // Process reverb
+    plate_reverb.ProcessSample(left_input * gain, right_input * gain, &rev_l, &rev_r);
 
     if (!bypass.reverb) {
-      // left_output = ((left_input * reverb.dry * 0.1) + (verb.getLeftOutput() * reverb.wet * clearPopCancelValue));
-      // right_output = ((right_input * reverb.dry * 0.1) + (verb.getRightOutput() * reverb.wet * clearPopCancelValue));
       left_output = ((left_input * reverb.dry * reverb_reverse_scale_factor) + (rev_l * reverb.wet * clearPopCancelValue));
       right_output = ((right_input * reverb.dry * reverb_reverse_scale_factor) + (rev_r * reverb.wet * clearPopCancelValue));
 
@@ -1364,9 +1356,6 @@ int main() {
 
   // Initialize Plate Reverb (Dattorro)
   plate_reverb.Init(hw.AudioSampleRate());
-
-  // Set default active reverb
-  current_reverb = &plate_reverb;
 
   // Default per-reverb edit parameters (matching preset values)
   ReverbEditParams default_ambient = {0.0f, 0.98f, 0.725f, 0.0f, 0.98f};
