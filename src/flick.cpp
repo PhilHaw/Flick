@@ -307,7 +307,7 @@ struct BypassState {
 // ============================================================================
 // REVERB ORCHESTRATOR STATE
 // ============================================================================
-// The reverb effects (PlateReverb, CloudReverb) are DSP-only
+// The reverb effects are DSP-only
 // modules with no knowledge of hardware. This orchestrator structure manages
 // UI state, mixing, current algorithm selection, and per-reverb parameter
 // values that are passed to the effects via the unified edit mode interface.

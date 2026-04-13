@@ -24,7 +24,7 @@ namespace flick {
 /**
  * Base class for reverb effects.
  *
- * Provides common interface for all reverb algorithms (plate, CloudSeed ambient, CloudSeed room).
+ * Provides common interface for all reverb algorithms.
  * Uses virtual functions to allow runtime algorithm switching via base class pointers.
  *
  * Design pattern: Virtual methods with no-op defaults for algorithm-specific parameters.
@@ -84,7 +84,6 @@ public:
    * Set tone/brightness of reverb tail.
    *
    * Plate: tank high-cut filter frequency.
-   * CloudSeed: post-processing cutoff frequency.
    *
    * @param tone Tone amount 0-1 (0=dark, 1=bright)
    */
@@ -94,7 +93,6 @@ public:
    * Set modulation depth (movement/shimmer).
    *
    * Plate: combined mod speed + depth.
-   * CloudSeed: late reverb line modulation amount.
    *
    * @param mod Modulation amount 0-1
    */

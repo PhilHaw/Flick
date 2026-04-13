@@ -4,10 +4,7 @@ The Flick is a reverb, tremolo, and delay pedal. The original goal of this pedal
 
 ### Effects
 
-**Reverb:** Three reverb algorithms selectable via toggle switch:
-- **Ambient** (CloudSeed algorithm, Rubi-Ka Fields preset) - spacious, lush, long ambient tail
-- **Plate** (Dattorro algorithm) - classic plate reverb with modulation
-- **Room** (CloudSeed algorithm, Small Room preset) - room/hall reverb with prominent early reflections
+**Reverb:** Three reverb algorithms selectable via toggle switch: Ambient, plate, and room
 
 All three reverb types have editable parameters (pre-delay, decay, tone, modulation, diffusion) via Reverb Edit Mode, with separate saved settings per reverb type.
 
