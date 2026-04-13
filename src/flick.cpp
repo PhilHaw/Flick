@@ -93,7 +93,7 @@ using daisysp::fonepole;
 
 /// Increment this when changing the settings struct so the software will know
 /// to reset to defaults if this ever changes.
-#define SETTINGS_VERSION 17
+#define SETTINGS_VERSION 18
 
 // Audio configuration
 constexpr float SAMPLE_RATE = 48000.0f;
@@ -107,6 +107,7 @@ constexpr float NOTCH_1_FREQ = 6037.7f;    // Primary hardware interference tone
 constexpr float NOTCH_2_FREQ = 16000.0f;   // Secondary interference tone
 
 // Reverb constants (plate scaling now internal to PlateReverb)
+constexpr float AMBIENT_WET_BOOST = 0.1f;
 
 // Tremolo constants
 constexpr float TREMOLO_SPEED_MIN = 0.2f;              // Minimum tremolo speed in Hz
@@ -259,7 +260,7 @@ struct ReverbEditParams {
 
 // Default per-reverb edit parameters — single source of truth for factory defaults.
 // Used by ReverbOrchestrator (in-memory baseline) and defaultSettings in main() (flash baseline).
-constexpr ReverbEditParams kDefaultAmbientParams = {0.0f, 0.85f, 0.725f, 0.2f,  0.9f};
+constexpr ReverbEditParams kDefaultAmbientParams = {0.2f, 0.85f, 0.725f, 0.2f,  0.9f};
 constexpr ReverbEditParams kDefaultPlateParams   = {0.0f, 0.8f,  0.725f, 0.0f,  0.85f};
 constexpr ReverbEditParams kDefaultRoomParams    = {0.0f, 0.4f,  0.725f, 0.0f,  0.425f};
 
@@ -500,6 +501,31 @@ int switchPosForValue(const T (&map)[3], T value) {
 
 inline float hardLimit100_(const float &x) {
   return (x > 1.0f) ? 1.0f : ((x < -1.0f) ? -1.0f : x);
+}
+
+struct ReverbWetDryMix {
+  float wet;
+  float dry;
+};
+
+inline ReverbWetDryMix reverbMixForType(ReverbType type, float wet_knob) {
+  float wet = wet_knob;
+  float dry = 1.0f;
+
+  switch (type) {
+    case REVERB_AMBIENT:
+      wet = daisysp::fclamp(wet_knob + AMBIENT_WET_BOOST, 0.0f, 1.0f);
+      dry = 1.0f - wet;
+      break;
+    case REVERB_PLATE:
+      dry = 1.0f - wet;
+      break;
+    case REVERB_ROOM:
+      dry = 1.0f;
+      break;
+  }
+
+  return {wet, dry};
 }
 
 void quickLedFlash() {
@@ -1094,18 +1120,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     delay_effect.SetFeedback(p_delay_feedback.Process());
     delay_drywet = (int)p_delay_amt.Process();
 
-    // Reverb dry/wet mode (from hardcoded mapping)
-    switch (reverb.current_type) {
-      case REVERB_AMBIENT:
-        reverb.dry = 0.0f;
-        break;
-      case REVERB_PLATE:
-        reverb.dry = 1.0f - reverb.wet;
-        break;
-      case REVERB_ROOM:
-        reverb.dry = 1.0f;
-        break;
-    }
+    ReverbWetDryMix mix = reverbMixForType(reverb.current_type, reverb.wet);
+    reverb.wet = mix.wet;
+    reverb.dry = mix.dry;
 
     // When the reverb type changes (switch moved, or first callback after boot),
     // apply the new type's saved parameters to plate_reverb.
@@ -1116,17 +1133,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out,
     }
   } else if (pedal_mode == PEDAL_MODE_EDIT_REVERB) {
     // Edit mode: knobs 2-6 control the locked reverb type's parameters
-    switch (reverb.edit_type) {
-      case REVERB_AMBIENT:
-        reverb.dry = 0.0f; // ALL WET
-        break;
-      case REVERB_PLATE:
-        reverb.dry = 1.0f - reverb.wet; // DRY WET MIX
-        break;
-      case REVERB_ROOM:
-        reverb.dry = 1.0f; // ALL DRY
-        break;
-    }
+    ReverbWetDryMix mix = reverbMixForType(reverb.edit_type, reverb.wet);
+    reverb.wet = mix.wet;
+    reverb.dry = mix.dry;
 
     ReverbEditParams& params = reverb.paramsForType(reverb.edit_type);
     float v;
