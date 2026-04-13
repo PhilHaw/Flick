@@ -392,7 +392,7 @@ class SineTremolo : public TremoloEffect { /* smooth */ };
 class SquareTremolo : public TremoloEffect { /* choppy */ };
 class HarmonicTremolo : public TremoloEffect { /* band-split */ };
 
-// Reverb: Base class with 2 derived algorithms
+// Reverb: Single concrete class, 3 modes via parameter sets
 class ReverbEffect {
   virtual void ProcessSample(...) = 0;
   virtual void SetDecay(float decay) {}      // Unified edit: Decay
@@ -401,8 +401,7 @@ class ReverbEffect {
   virtual void SetTone(float tone) {}        // Unified edit: Tone (brightness)
   virtual void SetModulation(float mod) {}   // Unified edit: Modulation (shimmer)
 };
-class PlateReverb : public ReverbEffect { /* Dattorro */ };
-class CloudReverb : public ReverbEffect { /* CloudSeed — 2 instances: ambient + room */ };
+class PlateReverb : public ReverbEffect { /* Dattorro — used for ambient, plate, and room */ };
 
 // Delay: Single class (no polymorphism needed)
 class DelayEffect {
@@ -427,7 +426,7 @@ SAMPLE_RATE = 48000.0f
 MAX_DELAY = 96000 samples (2 seconds)
 TREMOLO_SPEED_MIN = 0.2 Hz
 TREMOLO_SPEED_MAX = 16.0 Hz
-SETTINGS_VERSION = 9  // Increment on Settings struct change
+SETTINGS_VERSION = 17  // Increment on Settings struct change
 ```
 
 ## Development Notes
