@@ -67,36 +67,23 @@ The audio callback processes samples in this order:
 
 #### 1. Reverb System
 
-Three reverb algorithms selectable via Toggle Switch 1 in normal mode:
+Three reverb modes selectable via Toggle Switch 1 in normal mode, all using the same Dattorro plate reverb algorithm ([PlateauNEVersio/Dattorro.cpp](src/PlateauNEVersio/Dattorro.cpp)) but with different factory default parameters and dry/wet behaviour. There is a single `PlateReverb` instance; switching reverb type re-applies the saved parameter set for that type.
 
-**Cloud Reverb — Ambient** (CloudSeed Algorithm, Toggle UP/RIGHT)
-- Source: [cloud_reverb.h](src/cloud_reverb.h) / [cloud_reverb.cpp](src/cloud_reverb.cpp)
-- Based on CloudSeed by ValdemarOrn (MIT license), ported to Daisy by erwincoumans/GuitarML
-- Algorithm files in [src/CloudSeed/](src/CloudSeed/)
-- Preset: Rubi-Ka Fields (ambient, spacious, long decay)
-- Stereo with 1 delay line per channel, decorrelated via CrossSeed parameter
-- Uses shared 8MB SDRAM pool for delay buffers
-- Multitap early reflections + allpass diffusion + late reverb delay line
-- Block processing (8 samples) with FTZ mode for CPU efficiency
+**Ambient** (Toggle UP/RIGHT)
+- Default params: decay 0.85, diffusion 0.9, modulation 0.2, tone 0.725, pre-delay 0.0
+- Dry/wet behaviour: **ALL WET** (dry = 0, wet = knob 1)
+- Long, spacious sound with modulation for shimmer
 
-**Plate Reverb** (Dattorro Algorithm, Toggle MIDDLE)
-- Source: [PlateauNEVersio/Dattorro.cpp](src/PlateauNEVersio/Dattorro.cpp)
-- Based on Jon Dattorro's 1997 reverb paper
-- Uses SDRAM for large delay buffers
-- Features:
-  - Pre-delay (0-250ms)
-  - Input diffusion
-  - Tank diffusion (0-100%)
-  - High/low-cut filtering
-  - LFO modulation (speed, depth, shape)
-  - Decay control
-- Editable parameters saved to QSPI flash
+**Plate** (Dattorro Algorithm, Toggle MIDDLE)
+- Default params: decay 0.8, diffusion 0.85, modulation 0.0, tone 0.725, pre-delay 0.0
+- Dry/wet behaviour: **Dry/Wet Mix** (dry = 1 − wet, wet = knob 1)
+- Classic plate character, balanced dry/wet blend
+- Algorithm: [PlateauNEVersio/Dattorro.cpp](src/PlateauNEVersio/Dattorro.cpp), based on Jon Dattorro's 1997 reverb paper
 
-**Cloud Reverb — Room** (CloudSeed Algorithm, Toggle DOWN/LEFT)
-- Source: [cloud_reverb.h](src/cloud_reverb.h) / [cloud_reverb.cpp](src/cloud_reverb.cpp)
-- Same CloudSeed engine as ambient, separate instance with different preset
-- Preset: Small Room with extended decay for hall character
-- Shares SDRAM pool and lookup tables with the ambient CloudReverb instance
+**Room** (Toggle DOWN/LEFT)
+- Default params: decay 0.4, diffusion 0.425, modulation 0.0, tone 0.725, pre-delay 0.0
+- Dry/wet behaviour: **ALL DRY** (dry = 1.0, wet = knob 1 adds reverb on top)
+- Shorter, denser sound for subtle room ambience
 
 #### 2. Tremolo System
 
@@ -144,9 +131,8 @@ Simple digital delay with:
 ### DSP Components
 
 **Oscillator** - [flick_oscillator.h](src/flick_oscillator.h) / [flick_oscillator.cpp](src/flick_oscillator.cpp)
-- Multiple waveforms (sine, triangle, saw, square)
-- PolyBLEP anti-aliasing for square/saw/triangle
-- Rounded square wave for opto tremolo
+- Two waveforms: sine (`WAVE_SIN`) and rounded square (`WAVE_SQUARE_ROUNDED`)
+- Rounded square wave for opto-style tremolo
 - Phase accumulator architecture
 
 **Filters** - [flick_filters.hpp](src/flick_filters.hpp)
@@ -190,11 +176,11 @@ Simple digital delay with:
 - Each reverb type has its own saved parameter set
 - Uses parameter capture (soft takeover) to prevent sudden jumps
 - Unified knob mapping (5 knobs, no toggle switches):
-  - Knob 2: **Pre-delay** — Plate: pre-delay. CloudSeed: PreDelay
-  - Knob 3: **Decay** — Plate: decay. CloudSeed: LineDecay
-  - Knob 4: **Tone** — Plate: tank high-cut filter. CloudSeed: PostCutoffFrequency
-  - Knob 5: **Modulation** — Plate: combined mod speed+depth. CloudSeed: LineModAmount
-  - Knob 6: **Diffusion** — Plate: tank diffusion. CloudSeed: LateDiffusionFeedback
+  - Knob 2: **Pre-delay** — pre-delay time
+  - Knob 3: **Decay** — reverb tail length
+  - Knob 4: **Tone** — tank high-cut filter (brightness)
+  - Knob 5: **Modulation** — combined mod speed+depth
+  - Knob 6: **Diffusion** — tank diffusion (density)
 - Toggle switches are ignored in edit mode
 - Footswitch 1: Cancel (restore previous)
 - Footswitch 2: Save to flash
@@ -202,10 +188,7 @@ Simple digital delay with:
 **Device Settings** (`PEDAL_MODE_EDIT_DEVICE_SETTINGS`)
 - Activated by long-press of Footswitch 2
 - LEDs flash alternately
-- Toggle Switch 1 selects reverb wet/dry mode:
-  - RIGHT/UP: All Dry (100% dry, 0-100% wet)
-  - MIDDLE: Dry/Wet Mix
-  - LEFT/DOWN: All Wet (0% dry, 0-100% wet)
+- Toggle Switch 1: *(ignored)*
 - Toggle Switch 2 selects polarity:
   - RIGHT/UP: Invert Left channel
   - MIDDLE: Normal (no inversion)
@@ -245,15 +228,15 @@ struct ReverbEditParams {
 
 struct Settings {
   int version;              // SETTINGS_VERSION for migration
-  ReverbEditParams ambient_params;   // CloudSeed ambient edit params
-  ReverbEditParams plate_params;     // Dattorro plate edit params
-  ReverbEditParams room_params;      // CloudSeed room edit params
+  ReverbEditParams ambient_params;   // Ambient mode edit params (Dattorro, all-wet)
+  ReverbEditParams plate_params;     // Plate mode edit params (Dattorro, dry/wet mix)
+  ReverbEditParams room_params;      // Room mode edit params (Dattorro, all-dry)
   int mono_stereo_mode;     // I/O routing mode
   int polarity_mode;        // Phase inversion mode
-  int reverb_knob_mode;     // Reverb wet/dry knob behavior
   bool bypass_reverb;       // Reverb bypass state
   bool bypass_tremolo;      // Tremolo bypass state
   bool bypass_delay;        // Delay bypass state
+  float tapped_delay_samples; // Persisted tap tempo delay time (0 = use knob)
 };
 ```
 
@@ -281,8 +264,9 @@ make PLATFORM=hothouse
 
 **Sources:**
 - Core: `flick.cpp`, `daisy_hardware.cpp`, `flick_oscillator.cpp`
-- Reverbs: `cloud_reverb.cpp`, `plate_reverb.cpp`
-- CloudSeed: CloudSeed algorithm files (`FastSin.cpp`, `AudioLib/Biquad.cpp`, `AudioLib/ShaRandom.cpp`, `AudioLib/ValueTables.cpp`, `Utils/Sha256.cpp`)
+- Reverb: `plate_reverb.cpp`
+- Tremolo: `tremolo_effect.cpp`
+- Delay: `delay_effect.cpp`
 - PlateauNEVersio: Dattorro implementation and dependencies
 
 **Dependencies:**
@@ -300,8 +284,6 @@ make PLATFORM=hothouse
 **SDRAM Usage:**
 - Delay lines (2 seconds × 2 channels @ 48kHz)
 - Plate reverb buffers (50 InterpDelay buffers, ~28.8 MB)
-- CloudSeed shared pool (8 MB — two CloudReverb instances allocate sequentially)
-- CloudSeed ValueTables (3 lookup tables, ~48 KB) and FastSin (128 KB)
 
 **Flash Usage:**
 - Persistent settings in QSPI
@@ -323,7 +305,7 @@ make PLATFORM=hothouse
 | Knob 4  | Delay time | Delay time (frozen) | Tone | - |
 | Knob 5  | Delay feedback | Delay feedback | Modulation | - |
 | Knob 6  | Delay amount | Delay amount | Diffusion | - |
-| Switch 1 | Reverb type | Reverb type | *(ignored)* | Reverb wet/dry |
+| Switch 1 | Reverb type | Reverb type | *(ignored)* | *(ignored)* |
 | Switch 2 | Trem type | Trem type | *(ignored)* | Polarity |
 | Switch 3 | Delay timing | Delay timing | *(ignored)* | Mono/Stereo |
 | FSW 1 Single | Reverb on/off | Exit tap tempo | Cancel | Cancel |
@@ -371,35 +353,20 @@ Flick uses a clean separation between UX orchestration and DSP processing:
 src/
 ├── flick.cpp                    # UX orchestrator, audio callback, mode management
 ├── daisy_hardware.h/cpp         # Hardware abstraction layer (Funbox/HotHouse)
-├── parameter_capture.h          # Soft takeover for edit modes
+├── parameter_capture.h/cpp      # Soft takeover for edit modes
 │
 ├── delay_effect.h/cpp           # Delay effect (stereo delay with feedback)
 │
 ├── tremolo_effect.h/cpp         # Tremolo base class + 3 algorithms:
-│   │                            #   - SineTremolo (smooth)
-│   │                            #   - SquareTremolo (choppy opto-style)
-│   │                            #   - HarmonicTremolo (band-split + EQ)
+│                                #   - SineTremolo (smooth)
+│                                #   - SquareTremolo (choppy opto-style)
+│                                #   - HarmonicTremolo (band-split + EQ)
 │
 ├── reverb_effect.h              # Reverb base class (polymorphic interface)
-├── plate_reverb.h/cpp           # Plate reverb (Dattorro algorithm)
-├── cloud_reverb.h/cpp           # CloudSeed reverb adapter (ambient + room)
+├── plate_reverb.h/cpp           # Plate reverb (Dattorro algorithm, all 3 modes)
 │
 ├── flick_oscillator.h/cpp       # LFO/oscillator (used by tremolo effects)
 ├── flick_filters.hpp            # DSP filter implementations
-│
-├── CloudSeed/                   # CloudSeed algorithm (MIT license, adapted for Flick)
-│   ├── ReverbController.h       # Stereo controller, presets, parameter scaling
-│   ├── ReverbChannel.h          # Per-channel processing (1 delay line per channel)
-│   ├── AllpassDiffuser.h        # Cascaded allpass chain (2 stages max)
-│   ├── MultitapDiffuser.h       # Early reflections (up to 50 taps)
-│   ├── ModulatedAllpass.h       # Individual modulated allpass filter
-│   ├── ModulatedDelay.h         # Delay with sinusoidal LFO modulation
-│   ├── DelayLine.h              # Late reverb line (delay + diffuser + filters)
-│   ├── FastSin.h/cpp            # Fast sine lookup table (SDRAM)
-│   ├── Parameter.h              # Parameter enum
-│   ├── Utils.h                  # Buffer utilities
-│   ├── AudioLib/                # Biquad filters, ShaRandom, ValueTables, Lp1/Hp1
-│   └── Utils/                   # SHA-256 implementation (for seed randomization)
 │
 └── PlateauNEVersio/             # Third-party Dattorro implementation
     ├── Dattorro.hpp/cpp         # Plate reverb core (wrapped by PlateReverb)
