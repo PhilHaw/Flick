@@ -8,6 +8,8 @@
 - Only commit/push when the user explicitly says to do so
 - If uncertain, always ask before committing
 
+**Troubleshooting:** For Windows VS Code IntelliSense include errors around `daisy.h`/`unistd.h`, see the note in [README.md](README.md) under "VS Code IntelliSense Note (Windows)".
+
 ## Project Overview
 
 Flick is a multi-effect digital guitar pedal firmware for the Daisy Seed module. It combines reverb, tremolo, and delay effects, designed to replace the Strymon Flint with additional delay capabilities. The project is licensed under GPLv3.

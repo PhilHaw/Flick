@@ -127,6 +127,16 @@ If you have an ST-Link, you can install the software easily like this:
 $ make program
 ```
 
+### VS Code IntelliSense Note (Windows)
+
+If VS Code shows include errors around `#include "daisy.h"` (or reports missing `unistd.h` as a dependency), check `.vscode/c_cpp_properties.json` and make sure `compilerPath` is set to:
+
+```
+arm-none-eabi-g++
+```
+
+Do not use a Unix-only path like `/usr/local/bin/arm-none-eabi-g++` on Windows.
+
 If you only have USB, you'll need to put the Flick into DFU mode first and with it connected with a USB cable, you can then install the firmware by running:
 ```
 $ make program-dfu
