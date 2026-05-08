@@ -1,0 +1,77 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Flick (Funbox)",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "-C",
+                "src"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Build Flick (Hothouse)",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "-C",
+                "src",
+                "PLATFORM=hothouse"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Upload Flick (ST-Link, Funbox)",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "-C",
+                "src",
+                "program"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Upload Flick (DFU, Funbox)",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "-C",
+                "src",
+                "program-dfu"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Upload Flick (ST-Link, Hothouse)",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "-C",
+                "src",
+                "PLATFORM=hothouse",
+                "program"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Upload Flick (DFU, Hothouse)",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "-C",
+                "src",
+                "PLATFORM=hothouse",
+                "program-dfu"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}
