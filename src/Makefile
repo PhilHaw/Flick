@@ -1,7 +1,7 @@
 # Project Name
 TARGET = flick
 
-PLATFORM ?= funbox
+PLATFORM ?= hothouse
 
 # Uncomment to use LGPL (like ReverbSc, etc.)
 #USE_DAISYSP_LGPL=1
